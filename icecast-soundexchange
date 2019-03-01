@@ -1,5 +1,6 @@
 #!/usr/bin/perl
 
+use 5.012; # so readdir assigns to $_ in a lone while test
 use strict;
 no strict "refs";
 
@@ -16,6 +17,11 @@ use constant ICECASTLOGDIR => $ENV{ICECASTLOGDIR} || q(/var/log/icecast);
 use constant OUTPUTDIR => $ENV{OUTPUTDIR} || q(/var/tmp);
 use constant DEFAULT_MOUNTPOINTS => ( '', 'high', 'low', );
 
+# Pattern is DD/Mon/YYYY
+use constant DATE_PATTERN => qr(\d{2}/[A-Z][a-z]{2}/\d{4});
+
+sub getLogFiles( $$$$ );
+sub inDateRange( $$$$ );
 sub mon ( $$ );
 sub main ();
 
@@ -26,134 +32,211 @@ sub main () {
 
     my $retVal = undef;
 
-    my ( $result, $inputFile, $startDate, $endDate, $outputDir, $verbose, $debug, $help, $man ) = ( 0, 0, 0, 0, 0, 0, 0, 0, 0 );
+    my ( $result, $logDirectory, $startDate, $endDate, $outputDir, $verbose, $debug, $help, $man ) = ( 0, 0, 0, 0, 0, 0, 0, 0, 0 );
 
     my ( @logContents ) = ();
     my @mountpoints = undef;
 
     $result = GetOptions (
-	"input-file|i=s" => \$inputFile,
 	"start-date|s=s" => \$startDate,
 	"end-date|e=s" => \$endDate,
+	"log-directory|l=s" => \$logDirectory,
 	"output-dir|o=s" => \$outputDir,
-	"mount-point|p=s" => \@mountpoints,
-	"verbose|v" => \$verbose,
+	"mount-points|m=s" => \@mountpoints,
+	"verbose|v+" => \$verbose,
 	"debug|d+" => \$debug,
 	"help|h" => \$help,
-	"man|m" => \$man,
+	"man|M" => \$man,
 	);
     die "GetOptions returned " . $result . ". Stopped" if ( ! $result );
 
-    pod2usage ( 1 )             if ( defined ( $help ) && $help );
-    pod2usage ( -verbose => 2 ) if ( defined ( $man ) && $man );
+    pod2usage( 1 )             if ( defined( $help ) && $help );
+    pod2usage( -verbose => 2 ) if ( defined( $man ) && $man );
 
-    $verbose = $debug;
+    if ( ! $startDate || ! $endDate ) {
+	print STDERR "Please specify a starting date and an ending date for this report.\n";
+    }
+
+    $verbose = $debug if ( $debug );
 
     if ( $#mountpoints == 1 ) {
-	@mountpoints = split( /,/, join( ',', @mountpoints ));
+	@mountpoints = split( /, */, join( ',', @mountpoints ));
     } else {
 	@mountpoints = DEFAULT_MOUNTPOINTS;
     }
 
+    $logDirectory = $logDirectory || ICECASTLOGDIR;
+
     my $mountpointRE = join( '|', @mountpoints );
     $mountpointRE =~ s,\|,,;
 
-    if ( $startDate && $endDate ) {
+    my $start = str2time( $startDate );
+    my $end = str2time( $endDate );
 
-	my $start = str2time( $startDate );
-	my $end = str2time( $endDate );
+    print STDERR "Start date: ", $startDate, ": ", $start, ", End date: ", $endDate, ": ", $end, "\n" if ( $verbose );
 
-	print STDERR "Start date: ", $startDate, ": ", $start, ", End date: ", $endDate, ": ", $end, "\n" if ( $verbose );
+    # TODO: finish this (as of 2018-09-21)
+    my $logLines = getLogFiles( $startDate, $endDate, $logDirectory, $verbose );
 
-	$inputFile = $inputFile || ICECASTLOGDIR . q(/access.log);
+    $outputDir = $outputDir || OUTPUTDIR;
 
-	if ( -f $inputFile ) {
-	    $outputDir = $outputDir || OUTPUTDIR;
+    #207.190.123.196 - - [05/Mar/2013:22:09:36 -0600] "GET /high HTTP/1.0" 200 134755 "-" "WinampMPEG/5.63, Ultravox/2.1" 4
+    #166.228.136.249 - - [05/Mar/2013:22:11:55 -0600] "GET /high HTTP/1.1" 200 1002080 "-" "BREW-Applet/0x010950A6 (BREW/3.1.5.189; DeviceId:  1388; Lang: en)" 92
 
-	    open( LOG, $inputFile ) || die "Cannot open $inputFile for reading. Stopped";
-	    @logContents = <LOG>;
-	    close( LOG );
-	    # chomp( @logContents );
+    foreach my $logLine ( sort {
+	#                            Log line item:      day     month   year    hour   minute  second
+	#                           Array elements:       0       1       2       3       4       5
+	my @a = $a =~ qr(\d+\.\d+\.\d+\.\d+\s+-\s+-\s+\[(\d{2})/(\w{3})/(\d{4}):(\d{2}):(\d{2}):(\d{2})\s+);
+	my @b = $b =~ qr(\d+\.\d+\.\d+\.\d+\s+-\s+-\s+\[(\d{2})/(\w{3})/(\d{4}):(\d{2}):(\d{2}):(\d{2})\s+);
+	$a[2] <=> $b[2] ||
+	    mon($a[1], 0) <=> mon($b[1], 0) ||
+	    $a[0] <=> $b[0] ||
+	    $a[3] <=> $b[3] ||
+	    $a[4] <=> $b[4] ||
+	    $a[5] <=> $b[5]
+			  } @$logLines ) {
+	next unless ( $logLine =~ m#get\s+/($mountpointRE)\s+#i );
+	print STDERR $logLine if ( $debug > 1 );
 
-	    # print STDERR Dumper @logContents if ( $verbose );
-#207.190.123.196 - - [05/Mar/2013:22:09:36 -0600] "GET /high HTTP/1.0" 200 134755 "-" "WinampMPEG/5.63, Ultravox/2.1" 4
-#166.228.136.249 - - [05/Mar/2013:22:11:55 -0600] "GET /high HTTP/1.1" 200 1002080 "-" "BREW-Applet/0x010950A6 (BREW/3.1.5.189; DeviceId:  1388; Lang: en)" 92
+	if ( $logLine =~ m#^(\d+\.\d+\.\d+\.\d+)\s+-\s+-\s+\[(\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2})\s+[+-](0[056])00\]\s+"get\s+/($mountpointRE) http/\d\.\d"\s+(\d{3})\s+(\d+)\s+"([^"]+)"\s+"(.*)"\s+(\d+)$#i ) {
+	    my $ipAddress = $1;
+	    my ( $date, $hour, $minute, $second ) = split( /:/, $2);
+	    my $tzOffset = $3;
+	    my $mountPoint = $4;
+	    my $statusCode = $5;
+	    my $byteCount = $6;
+	    my $referer = $7;
+	    my $client = $8;
+	    my $duration = $9;
+	    my ( $mday, $mon, $year ) = split( /\//, $date );
 
-	    foreach my $logLine ( @logContents ) {
-		next unless ( $logLine =~ m#get\s+/($mountpointRE)\s+#i );
-		print STDERR $logLine if ( $debug > 1 );
+	    print STDERR "ipAddress: $ipAddress + referer: $referer + client: $client\n" if ($debug);
 
-		if ( $logLine =~ m#^(\d+\.\d+\.\d+\.\d+)\s+-\s+-\s+\[(\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2})\s+[+-](0[056])00\]\s+"get\s+/($mountpointRE) http/\d\.\d"\s+(\d{3})\s+(\d+)\s+"([^"]+)"\s+"(.*)"\s+(\d+)$#i ) {
-		    my $ipAddress = $1;
-		    my ( $date, $hour, $minute, $second ) = split( /:/, $2);
-		    my $tzOffset = $3;
-		    my $mountPoint = $4;
-		    my $statusCode = $5;
-		    my $byteCount = $6;
-		    my $referer = $7;
-		    my $client = $8;
-		    my $duration = $9;
-		    my ( $mday, $mon, $year ) = split( /\//, $date );
+	    # This time is actually the time the user disconnected
+	    # from the stream. We need to calculate the time at
+	    # which they connected to the stream by subtracting
+	    # the duration from this 'end time'
+	    my $time = timelocal( $second, $minute, $hour, $mday, mon( $mon, $verbose ), $year );
+	    $time -= $duration;
 
-		    print STDERR "ipAddress: $ipAddress + referer: $referer + client: $client\n" if ($debug);
+	    my $connectTime = gmtime( $time );
+	    next unless ( $connectTime >= $start && $connectTime <= $end );
 
-		    # this time is actually the time the user disconnected
-		    # from the stream. We need to calculate the time at
-		    # which they connected to the stream by subtracting
-		    # the duration from this 'end time'
-		    my $time = timelocal( $second, $minute, $hour, $mday, mon( $mon, $verbose ), $year );
-		    $time -= $duration;
+	    print STDERR
+		$ipAddress, " ",
+		$connectTime->ymd, " ",
+		$connectTime->hms, " ",
+		$mountPoint, " ", $duration, " ", $statusCode,
+		" ->", $referer, "<- ->", $client, "<-\n"
+		if ( $verbose > 1);
 
-		    next unless ( $start <= $time && $time <= $end );
+	    my $entry = sprintf
+		"%s\t%s\t%s\t%s\t%d\t%03d\t%s/%s",
+		$ipAddress,
+		$connectTime->ymd,
+		$connectTime->hms,
+		$mountPoint,
+		$duration,
+		$statusCode,
+		$referer,
+		$client
+		;
 
-		    # my $connectTime = localtime( $time );
-		    my $connectTime = gmtime( $time );
-
-		    print STDERR
-			$ipAddress, " ",
-			$connectTime->ymd, " ",
-			$connectTime->hms, " ",
-			$mountPoint, " ", $duration, " ", $statusCode,
-			" ->", $referer, "<- ->", $client, "<-\n"
-			if ( $verbose);
-
-		    my $entry = sprintf
-			"%s\t%s\t%s\t%s\t%d\t%03d\t%s/%s",
-			$ipAddress,
-			$connectTime->ymd,
-			$connectTime->hms,
-			$mountPoint,
-			$duration,
-			$statusCode,
-			$referer,
-			$client
-			;
-
-		    # collect the entries per-mountpoint
-		    push( @$mountPoint, $entry );
-		} else {
-		    print STDERR "Regex match failed for logLine:\n", $logLine;
-		}
-	    }
-
-	    # write per-mountpoint files with all collected entries
-	    for my $mount ( @mountpoints ) {
-		next unless ( $mount );
-		open( OUT, ">", "$outputDir/$mount.txt" ) || die "Cannot open $outputDir/$mount.txt for writing ($!). Stopped";
-		foreach my $line ( @$mount ) {
-		    print OUT $line, "\r\n";
-		}
-		close( OUT );
-	    }
-
+	    # collect the entries per-mountpoint
+	    push( @$mountPoint, $entry );
 	} else {
-	    print STDERR "Cannot read file ", $inputFile, ". I quit.\n";
+	    print STDERR "Regex match failed for logLine:\n", $logLine;
 	}
-    } else {
-	print STDERR "Please specify a starting date and an ending date for this report.\n";
+    }
+
+    # write per-mountpoint files with all collected entries
+    for my $mount ( @mountpoints ) {
+	next unless ( $mount );
+	open( OUT, ">", "$outputDir/$mount.txt" ) || die "Cannot open $outputDir/$mount.txt for writing ($!). Stopped";
+	foreach my $line ( @$mount ) {
+	    print OUT $line, "\r\n";
+	}
+	close( OUT );
     }
 }
 
+# Get the contents of the log files that contain entries in the range
+# of our start and end dates.
+# Returns an array ref containing all relevant log file entries.
+sub getLogFiles( $$$$ ) {
+    my $startDate = shift;
+    my $endDate = shift;
+    my $logDirectory = shift;
+    my $verbose = shift;
+
+    my @logFileNames = ();
+    my @validLogLines = ();
+
+    # strptime() returns this array: ($ss,$mm,$hh,$day,$month,$year,$zone)
+    my @start = strptime( $startDate );
+    my $startYYYYMMDD = sprintf( "%04d%02d%02d", $start[5] + 1900, $start[4] + 1, $start[3]);
+    my @end = strptime( $endDate );
+    my $endYYYYMMDD = sprintf( "%04d%02d%02d", $end[5] + 1900, $end[4] + 1, $end[3]);
+
+    opendir( my $dirH, $logDirectory ) ||
+	die "Cannot open icecast log directory '$logDirectory'. Stopped";
+
+    while ( readdir $dirH ) {
+	next unless ( /^access/ );
+	my $lf = undef;
+	my $lfDate = undef;
+
+	# Log filename may end with a timestamp suffix, or simply
+	# ".log". Skip log files with timestamps outside our date
+	# range. We always want to examine "access.log".
+	( $lfDate = $_ ) =~ s/^access\.log(\.(\d{8})_\d+)*/$2/;
+	next if ( $lfDate && ( $lfDate <= $startYYYYMMDD || $lfDate >= $endYYYYMMDD ));
+
+	say STDERR "Looking at $_" if ( $verbose );
+
+	open( LF, ICECASTLOGDIR . "/" . $_ ) ||
+	    die "Cannot open " . ICECASTLOGDIR . "/" . $_ . " for reading. Stopped";
+	my @lines = <LF>;
+	close( LF );
+	say STDERR $_, " has ", $#lines, " lines" if ( $verbose > 1 );
+
+	if ( inDateRange( \@lines, $startDate, $endDate, $verbose )) {
+	    push( @validLogLines, @lines );
+	}
+    }
+
+    closedir $dirH;
+
+    say STDERR Dumper @logFileNames if ( $verbose );
+    say STDERR "Found ", $#validLogLines, " log lines." if ( $verbose );
+
+    \@validLogLines;
+}
+
+# Determine whether the list of lines is within the startDate and
+# endDate range.
+# Returns true if so, otherwise false.
+sub inDateRange( $$$$ ) {
+    my $lines = shift;
+    my $startDate = shift;
+    my $endDate = shift;
+    my $verbose = shift;
+
+    my $s = str2time( $startDate );
+    my $e = str2time( $endDate );
+
+    foreach my $line ( @$lines ) {
+	my ($j1, $dateTime, $j2) = split( /[\[\]]/, $line );
+	my $lineDate = str2time( $dateTime );
+	say STDERR "$lineDate in date range $s - $e" if (( $verbose > 1 ) && ($lineDate >= $s && $lineDate <= $e ));
+	return 1 if ( $lineDate >= $s && $lineDate <= $e );
+    }
+
+    0;
+}
+
+# Return the zero-based decimal month number for the month name
+# passed.
 sub mon ( $$ ) {
     my $monthName = shift;
     my $verbose = shift;
@@ -184,15 +267,18 @@ B<icecast-soundexchange> - munge icecast logs into NPR soundexchange format
 
 =head1 SYNOPSIS
 
-icecast-soundexchange [ --help ] [ --man ] [ --debug ] [ --verbose ] \
-                   [ --input-file <input-file> ] \
-                   --start-date <start-date> --end-date <end-date>
+  icecast-soundexchange [ --help ] [ --man ] [ --debug ] [ --verbose ]
+                        [ --input-file <input-file> ]
+                        [ --mount-points <comma-separated-list> ]
+                        --start-date <start-date> --end-date <end-date>
 
 =head1 DESCRIPTION
 
-B<icecast-soundexchange> reads icecast access log files and writes
-tab-separated fields into (DOS-format) text files, one per icecast
-mount-point.
+B<icecast-soundexchange> reads icecast access log files and writes tab-separated fields into (DOS-format) text files, one per icecast mount-point.
+
+B<--start-date> and B<--end-date> are required.
+
+By default B<icecast-soundexchange> searches for log files in the directory I</var/log/icecast>. You may set and export the environment variable I<ICECASTLOGDIR> to a directory containing your icecast log files.
 
 See
 http://digitalservices.npr.org/post/soundexchange-streaming-file-format-standard-announced
@@ -200,13 +286,15 @@ for details of the file format.
 
 =head1 OPTIONS
 
+Long options consist of (possibly hyphenated) English words and begin with I<-->; short options consist of a single letter and begin with a single hyphen I<->.
+
 =over 8
 
 =item B<--help (-h)>
 
 show a brief usage message
 
-=item B<--man (-m)>
+=item B<--man (-M)>
 
 show the complete manual page for this command
 
@@ -229,14 +317,15 @@ Format: DD/Mon/YYYY where Mon is the 3-letter abbreviation for the month name
 (REQUIRED) specify the ending date for the log messages.
 Format: DD/Mon/YYYY where Mon is the 3-letter abbreviation for the month name
 
-=item B<--input-file (-i) E<lt>log-file-name<gt>>
+=item B<--mount-points (-m) E<lt>comma-separated-listE<gt>>
 
-name the input icecast log file, B<access.log> is the default name
+Specify one or more mount points for which to report. All mount points
+must match actual mount points provided by the Icecast server.
 
-=item B<--output-dir (-o) E<lt>directory-name<gt>>
+=item B<--output-dir (-o) E<lt>directory-nameE<gt>>
 
 name the output directory for the per-mountpoint NPR-format files.
-The default is in the perl constant OUTPUTDIR (/var/tmp).
+The default is in the perl constant OUTPUTDIR (I</var/tmp>).
 
 =back
 
