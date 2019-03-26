@@ -8,6 +8,7 @@ use Data::Dumper;
 use Time::Local;
 use Time::Piece;
 use Date::Parse;
+use Archive::Zip qw( :ERROR_CODES :CONSTANTS );
 
 use Getopt::Long;
 Getopt::Long::Configure ( "bundling" );
@@ -16,6 +17,7 @@ use Pod::Usage;
 use constant ICECASTLOGDIR => $ENV{ICECASTLOGDIR} || q(/var/log/icecast);
 use constant OUTPUTDIR => $ENV{OUTPUTDIR} || q(/var/tmp);
 use constant DEFAULT_MOUNTPOINTS => ( '', 'high', 'low', );
+use constant ONE_DAY => 60 * 60 * 24;
 
 # Pattern is DD/Mon/YYYY
 use constant DATE_PATTERN => qr(\d{2}/[A-Z][a-z]{2}/\d{4});
@@ -32,10 +34,11 @@ sub main () {
 
     my $retVal = undef;
 
-    my ( $result, $logDirectory, $startDate, $endDate, $outputDir, $verbose, $debug, $help, $man ) = ( 0, 0, 0, 0, 0, 0, 0, 0, 0 );
+    my ( $result, $logDirectory, $startDate, $endDate, $outputDir, $zipFile, $verbose, $debug, $help, $man ) = ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 );
 
     my ( @logContents ) = ();
     my @mountpoints = undef;
+    my $zip = undef;
 
     $result = GetOptions (
 	"start-date|s=s" => \$startDate,
@@ -43,6 +46,7 @@ sub main () {
 	"log-directory|l=s" => \$logDirectory,
 	"output-dir|o=s" => \$outputDir,
 	"mount-points|m=s" => \@mountpoints,
+	"zip-file|z=s" => \$zipFile,
 	"verbose|v+" => \$verbose,
 	"debug|d+" => \$debug,
 	"help|h" => \$help,
@@ -67,11 +71,16 @@ sub main () {
 
     $logDirectory = $logDirectory || ICECASTLOGDIR;
 
+    if ( $zipFile ) {
+	$zip = Archive::Zip->new();
+    }
+
     my $mountpointRE = join( '|', @mountpoints );
     $mountpointRE =~ s,\|,,;
 
     my $start = str2time( $startDate );
     my $end = str2time( $endDate );
+    $end += ONE_DAY;
 
     print STDERR "Start date: ", $startDate, ": ", $start, ", End date: ", $endDate, ": ", $end, "\n" if ( $verbose );
 
@@ -128,7 +137,7 @@ sub main () {
 		$connectTime->hms, " ",
 		$mountPoint, " ", $duration, " ", $statusCode,
 		" ->", $referer, "<- ->", $client, "<-\n"
-		if ( $verbose > 1);
+		if ( $verbose > 2);
 
 	    my $entry = sprintf
 		"%s\t%s\t%s\t%s\t%d\t%03d\t%s/%s",
@@ -152,11 +161,27 @@ sub main () {
     # write per-mountpoint files with all collected entries
     for my $mount ( @mountpoints ) {
 	next unless ( $mount );
-	open( OUT, ">", "$outputDir/$mount.txt" ) || die "Cannot open $outputDir/$mount.txt for writing ($!). Stopped";
-	foreach my $line ( @$mount ) {
-	    print OUT $line, "\r\n";
+
+	# Stash the per-mountpoint files into the zip archive if so requested.
+	if ( $zipFile ) {
+	    my $zipString = join( "\n", @$mount );
+
+	    my $stringMember = $zip->addString( $zipString, "$mount.txt" );
+	    $stringMember->desiredCompressionMethod( COMPRESSION_DEFLATED );
+	    say STDERR "Added $mount.txt to '$zipFile'." if ( $verbose );
+	} else {
+	    open( OUT, ">", "$outputDir/$mount.txt" ) || die "Cannot open $outputDir/$mount.txt for writing ($!). Stopped";
+	    foreach my $line ( @$mount ) {
+		print OUT $line, "\r\n";
+	    }
+	    close( OUT );
 	}
-	close( OUT );
+    }
+
+    if ( $zipFile ) {
+	unless ( $zip->writeToFileNamed( $zipFile ) == AZ_OK ) {
+	    die "Error writing to Zip archive '$zipFile'. Stopped";
+	}
     }
 }
 
@@ -224,6 +249,7 @@ sub inDateRange( $$$$ ) {
 
     my $s = str2time( $startDate );
     my $e = str2time( $endDate );
+    $e += ONE_DAY;
 
     foreach my $line ( @$lines ) {
 	my ($j1, $dateTime, $j2) = split( /[\[\]]/, $line );
@@ -326,6 +352,11 @@ must match actual mount points provided by the Icecast server.
 
 name the output directory for the per-mountpoint NPR-format files.
 The default is in the perl constant OUTPUTDIR (I</var/tmp>).
+
+=item B<--zip-file (-z) E<lt>zip-filenameE<gt>>
+
+name the Zip archive file in which to place the output files. There is
+no default.
 
 =back
 
