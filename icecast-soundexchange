@@ -58,7 +58,7 @@ sub main () {
     pod2usage( -verbose => 2 ) if ( defined( $man ) && $man );
 
     if ( ! $startDate || ! $endDate ) {
-	print STDERR "Please specify a starting date and an ending date for this report.\n";
+	say STDERR "Please specify a starting date and an ending date for this report.";
     }
 
     $verbose = $debug if ( $debug );
@@ -82,7 +82,7 @@ sub main () {
     my $end = str2time( $endDate );
     $end += ONE_DAY;
 
-    print STDERR "Start date: ", $startDate, ": ", $start, ", End date: ", $endDate, ": ", $end, "\n" if ( $verbose );
+    say STDERR "Start date: ", $startDate, ": ", $start, ", End date: ", $endDate, ": ", $end if ( $verbose );
 
     # TODO: finish this (as of 2018-09-21)
     my $logLines = getLogFiles( $startDate, $endDate, $logDirectory, $verbose );
@@ -105,13 +105,16 @@ sub main () {
 	    $a[5] <=> $b[5]
 			  } @$logLines ) {
 	next unless ( $logLine =~ m#get\s+/($mountpointRE)\s+#i );
-	print STDERR $logLine if ( $debug > 1 );
+	say STDERR $logLine if ( $debug > 1 );
 
-	if ( $logLine =~ m#^(\d+\.\d+\.\d+\.\d+)\s+-\s+-\s+\[(\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2})\s+[+-](0[056])00\]\s+"get\s+/($mountpointRE) http/\d\.\d"\s+(\d{3})\s+(\d+)\s+"([^"]+)"\s+"(.*)"\s+(\d+)$#i ) {
+	# Bug Alert: the sub-expression "(\d{2})00" represents the
+	# timezone offset in the date/time field. It currently assumes
+	# an integral number of hours offset from GMT (UTC).
+	if ( $logLine =~ m#^(\d+\.\d+\.\d+\.\d+)\s+-\s+-\s+\[(\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2})\s+[+-](\d{2})00\]\s+"get\s+/($mountpointRE) http/\d\.\d"\s+(\d{3})\s+(\d+)\s+"([^"]+)"\s+"(.*)"\s+(\d+)$#i ) {
 	    my $ipAddress = $1;
 	    my ( $date, $hour, $minute, $second ) = split( /:/, $2);
 	    my $tzOffset = $3;
-	    my $mountPoint = $4;
+	    my $loggedMountPoint = $4;
 	    my $statusCode = $5;
 	    my $byteCount = $6;
 	    my $referer = $7;
@@ -119,7 +122,7 @@ sub main () {
 	    my $duration = $9;
 	    my ( $mday, $mon, $year ) = split( /\//, $date );
 
-	    print STDERR "ipAddress: $ipAddress + referer: $referer + client: $client\n" if ($debug);
+	    say STDERR "ipAddress: $ipAddress + referer: $referer + client: $client" if ($debug);
 
 	    # This time is actually the time the user disconnected
 	    # from the stream. We need to calculate the time at
@@ -131,12 +134,12 @@ sub main () {
 	    my $connectTime = gmtime( $time );
 	    next unless ( $connectTime >= $start && $connectTime <= $end );
 
-	    print STDERR
+	    say STDERR
 		$ipAddress, " ",
 		$connectTime->ymd, " ",
 		$connectTime->hms, " ",
-		$mountPoint, " ", $duration, " ", $statusCode,
-		" ->", $referer, "<- ->", $client, "<-\n"
+		$loggedMountPoint, " ", $duration, " ", $statusCode,
+		" ->", $referer, "<- ->", $client, "<-"
 		if ( $verbose > 2);
 
 	    my $entry = sprintf
@@ -144,7 +147,7 @@ sub main () {
 		$ipAddress,
 		$connectTime->ymd,
 		$connectTime->hms,
-		$mountPoint,
+		$loggedMountPoint,
 		$duration,
 		$statusCode,
 		$referer,
@@ -152,9 +155,9 @@ sub main () {
 		;
 
 	    # collect the entries per-mountpoint
-	    push( @$mountPoint, $entry );
+	    push( @$loggedMountPoint, $entry );
 	} else {
-	    print STDERR "Regex match failed for logLine:\n", $logLine;
+	    say STDERR "Regex match failed for logLine:\n\t", $logLine;
 	}
     }
 
@@ -164,13 +167,16 @@ sub main () {
 
 	# Stash the per-mountpoint files into the zip archive if so requested.
 	if ( $zipFile ) {
-	    my $zipString = join( "\n", @$mount );
+	    # Note the <Tab> characters in the string.
+	    my $zipString = join( "\r\n", ( "IPAddress	Date	Time	Stream	Duration	Status	Referrer", @$mount, '' ));
 
 	    my $stringMember = $zip->addString( $zipString, "$mount.txt" );
 	    $stringMember->desiredCompressionMethod( COMPRESSION_DEFLATED );
 	    say STDERR "Added $mount.txt to '$zipFile'." if ( $verbose );
 	} else {
 	    open( OUT, ">", "$outputDir/$mount.txt" ) || die "Cannot open $outputDir/$mount.txt for writing ($!). Stopped";
+	    # Again, note the <Tab> characters in the string.
+	    print OUT "IPAddress	Date	Time	Stream	Duration	Status	Referrer\r\n";
 	    foreach my $line ( @$mount ) {
 		print OUT $line, "\r\n";
 	    }
@@ -215,12 +221,12 @@ sub getLogFiles( $$$$ ) {
 	# ".log". Skip log files with timestamps outside our date
 	# range. We always want to examine "access.log".
 	( $lfDate = $_ ) =~ s/^access\.log(\.(\d{8})_\d+)*/$2/;
-	next if ( $lfDate && ( $lfDate <= $startYYYYMMDD || $lfDate >= $endYYYYMMDD ));
+	next if ( $lfDate && ( $lfDate < $startYYYYMMDD || $lfDate > $endYYYYMMDD ));
 
 	say STDERR "Looking at $_" if ( $verbose );
 
-	open( LF, ICECASTLOGDIR . "/" . $_ ) ||
-	    die "Cannot open " . ICECASTLOGDIR . "/" . $_ . " for reading. Stopped";
+	open( LF, $logDirectory . "/" . $_ ) ||
+	    die "Cannot open " . $logDirectory . "/" . $_ . " for reading. Stopped";
 	my @lines = <LF>;
 	close( LF );
 	say STDERR $_, " has ", $#lines, " lines" if ( $verbose > 1 );
@@ -294,8 +300,10 @@ B<icecast-soundexchange> - munge icecast logs into NPR soundexchange format
 =head1 SYNOPSIS
 
   icecast-soundexchange [ --help ] [ --man ] [ --debug ] [ --verbose ]
-                        [ --input-file <input-file> ]
-                        [ --mount-points <comma-separated-list> ]
+                        [ --log-directory (-l) <directory-path> ]
+                        [ --mount-points (-m) <comma-separated-list> ]
+                        [ --output-directory (-o) <full-path-to-a-directory> ]
+                        [ --zip-file (-z) <zip-file> ]
                         --start-date <start-date> --end-date <end-date>
 
 =head1 DESCRIPTION
@@ -304,7 +312,7 @@ B<icecast-soundexchange> reads icecast access log files and writes tab-separated
 
 B<--start-date> and B<--end-date> are required.
 
-By default B<icecast-soundexchange> searches for log files in the directory I</var/log/icecast>. You may set and export the environment variable I<ICECASTLOGDIR> to a directory containing your icecast log files.
+By default B<icecast-soundexchange> searches for log files in the directory I</var/log/icecast>. You may set and export the environment variable I<ICECASTLOGDIR> to a directory containing your icecast log files or use the B<--log-directory> option to specify that directory.
 
 See
 http://digitalservices.npr.org/post/soundexchange-streaming-file-format-standard-announced
@@ -315,6 +323,16 @@ for details of the file format.
 Long options consist of (possibly hyphenated) English words and begin with I<-->; short options consist of a single letter and begin with a single hyphen I<->.
 
 =over 8
+
+=item B<--start-date (-s) E<lt>start-dateE<gt>>
+
+(REQUIRED) specify the starting date for the log messages.
+Format: DD/Mon/YYYY where Mon is the 3-letter abbreviation for the month name
+
+=item B<--end-date (-e) E<lt>end-dateE<gt>>
+
+(REQUIRED) specify the ending date for the log messages.
+Format: DD/Mon/YYYY where Mon is the 3-letter abbreviation for the month name
 
 =item B<--help (-h)>
 
@@ -333,30 +351,27 @@ multiple times for more debugging.
 
 launch B<icecast-soundexchange> in verbose mode (not quite as verbose as B<--debug>)
 
-=item B<--start-date (-s) E<lt>start-dateE<gt>>
-
-(REQUIRED) specify the starting date for the log messages.
-Format: DD/Mon/YYYY where Mon is the 3-letter abbreviation for the month name
-
-=item B<--end-date (-e) E<lt>end-dateE<gt>>
-
-(REQUIRED) specify the ending date for the log messages.
-Format: DD/Mon/YYYY where Mon is the 3-letter abbreviation for the month name
-
 =item B<--mount-points (-m) E<lt>comma-separated-listE<gt>>
 
 Specify one or more mount points for which to report. All mount points
 must match actual mount points provided by the Icecast server.
 
-=item B<--output-dir (-o) E<lt>directory-nameE<gt>>
+=item B<--log-directory (-l) E<lt>directory-nameE<gt>>
 
-name the output directory for the per-mountpoint NPR-format files.
-The default is in the perl constant OUTPUTDIR (I</var/tmp>).
+name the directory path that contains the Icecast log files..
+The default is in the perl constant ICECASTLOGDIR (I</var/log/icecast>).
 
 =item B<--zip-file (-z) E<lt>zip-filenameE<gt>>
 
 name the Zip archive file in which to place the output files. There is
 no default.
+
+=item B<--output-directory (-o) E<lt>full-path-to-a-directoryE<gt>>
+
+Specify the directory name for the output files. This option is
+mutually exclusive with B<--zip-file>. That is, you may either request
+individual files named for the mount points, I<or> you may request a
+zip archive containing all the mount-point files.
 
 =back
 
