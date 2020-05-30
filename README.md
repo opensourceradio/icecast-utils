@@ -5,7 +5,7 @@ Various tools and utilities to work with the [Icecast2](http://icecast.org/) str
 
 `icecast-soundexchange` is a stand-alone Perl script that parses Icecast log files and generates one or more [NPR Digital Services-compliant](http://digitalservices.npr.org/post/soundexchange-streaming-file-format-standard-announced) SoundExchange stream server text files. Optionally, it will place these files in a Zip archive for you (`--zip-file` option). Specify an Icecast log directory (`--log-directory` [default: _/var/log/icecast_]), a start date (`--start-date`), an end date (`--end-date`), and one or more Icecast mount points. Here is an example of using the script on the command line:
 
-    icecast-soundexchange --start-date 01/Mar/2020 --end-date 15/Mar/2020 --zip-file report-2020-q1.zip play,high,low
+    icecast-soundexchange --start-date 01/Mar/2020 --end-date 15/Mar/2020 --zip-file report-2020-q1.zip --mount-points play,high,low
 
 This will generate the named Zip archive containing the text files `play.txt`, `high.txt`, and `low.txt` with records from the stream log between March 1, 2020 and March 15, 2020 (inclusive).
 
